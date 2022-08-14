@@ -1,0 +1,21 @@
+[build-system]
+build-backend = "poetry.core.masonry.api"
+requires = ["poetry-core>=1.0.0"]
+
+[tool.poetry]
+authors = ["Rafal Krupinski"]
+description = "Unofficial Python client for the Peerberry market"
+license = "GPL-3.0-only"
+name = "peerberry"
+version = "0.1.0"
+
+[tool.poetry.dependencies]
+httpx = {extras = ["http2"], version = "^0.23.0"}
+httpx-auth = "^0.15.0"
+openpyxl = "^3.0.10"
+pandas = "^1.4.3"
+pydantic = "^1.9.2"
+python = "^3.10"
+
+[tool.poetry.dev-dependencies]
+toml-sort = "^0.20.0"
