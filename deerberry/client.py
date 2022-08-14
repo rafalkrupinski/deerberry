@@ -1,79 +1,53 @@
 import logging
 import typing
-from decimal import Decimal
+from functools import cache
 from pathlib import Path
-from typing import Union
+from typing import Union, Optional, AsyncGenerator
 
 import httpx
-import pandas as pd
 
+from .api_client_base import ApiClientBase, json_params, default_page_size
 from .auth import PeerBerryCredentials
+from .investor import InvestorApi
 from .model.loan import Loan
 
 logger = logging.getLogger(__name__)
 
 BASE_URL = 'https://api.peerberry.com'
 
-default_page_size = 100
 
-_json_params = {
-    'parse_float': Decimal,
-}
+class Client(ApiClientBase):
+    def __init__(
+            self,
+            email: str,
+            password: str,
+            credentials_store: Union[Path, str, None] = None,
+            page_size=default_page_size
+    ):
+        """
+        :param email: user email
+        :param password:  user password
+        :param credentials_store: path to a file to store tokens
+        """
 
-
-class Client:
-    def __init__(self, email, password, credentials_store: Union[Path, str, None] = None, ):
-        self._client = httpx.AsyncClient(
-            auth=PeerBerryCredentials(
-                BASE_URL,
-                email,
-                password,
-                credentials_store,
+        super().__init__(
+            httpx.AsyncClient(
+                auth=PeerBerryCredentials(
+                    BASE_URL,
+                    email,
+                    password,
+                    credentials_store,
+                ),
+                http2=True,
+                base_url=BASE_URL,
             ),
-            http2=True,
-            base_url=BASE_URL,
+            page_size,
         )
 
-    async def _get_all_pages(self, flow: typing.Generator[httpx.Request, httpx.Response, None]) -> typing.AsyncGenerator[httpx.Response, None]:
-        request = next(flow)
-
-        while True:
-            response = await self._client.send(request)
-            await response.aread()
-            yield response
-            try:
-                request = flow.send(response)
-            except StopIteration:
-                break
-
-    async def investments(self, inv_type: str) -> pd.DataFrame:
-        def prepare_request() -> typing.Generator[httpx.Request, httpx.Response, None]:
-            offset = 0
-            while True:
-                response = yield self._client.build_request('GET', 'v1/investor/investments', params=httpx.QueryParams({
-                    'pageSize': default_page_size,
-                    'type': inv_type,
-                    'sort': 'loanId',
-                    'offset': offset,
-                }))
-                obj = response.json()
-                offset += default_page_size
-                if offset > obj['total']:
-                    break
-
-        responses: list[httpx.Response] = []
-        async for resp in self._get_all_pages(prepare_request()):
-            resp.raise_for_status()
-            responses.append(resp)
-
-        dfs = [pd.json_normalize(resp.json(**_json_params)['data']) for resp in responses]
-        return pd.concat(dfs, ignore_index=True)
-
-    async def investments_current(self) -> pd.DataFrame:
-        return await self.investments('CURRENT')
-
-    async def investments_finished(self) -> pd.DataFrame:
-        return await self.investments('FINISHED')
+    @property
+    @cache
+    def investor(self):
+        return InvestorApi(self._client, self._page_size)
 
     async def loan_raw(self, loan_id: str) -> dict:
         url = f'v1/loans/{loan_id}'
@@ -81,17 +55,28 @@ class Client:
         resp = await self._client.get(url)
         resp.raise_for_status()
         await resp.aread()
-        return resp.json(**_json_params)
+        return resp.json(**json_params)
 
     async def loan(self, loan_id: str) -> Loan:
         d = await self.loan_raw(loan_id)
         return Loan(**d)
 
-    async def loans(self, *, page_size: int = default_page_size):
-        resp = await self._client.get('v1/loans', params={
-            'sort': '-loanId',
-            'pageSize': page_size,
-        })
-        resp.raise_for_status()
-        await resp.aread()
-        return resp.json(**_json_params)
+    async def loans_raw(self, *, limit: Optional[int] = None) -> AsyncGenerator[dict, None]:
+        def generate_pages() -> typing.Generator[httpx.Request, httpx.Response, None]:
+            offset = 0
+            page_size = min(self._page_size, limit)
+            while True:
+                response = yield self._client.build_request('GET', 'v1/loans', params=httpx.QueryParams({
+                    'sort': '-loanId',
+                    'pageSize': page_size,
+                    'offset': offset,
+                }))
+                obj = response.json()
+                offset += self._page_size
+                if offset >= obj['total'] or (limit is not None and offset >= limit):
+                    break
+
+        async for resp in self._get_all_pages(generate_pages()):
+            resp.raise_for_status()
+            for elem in resp.json(**json_params)['data']:
+                yield elem
